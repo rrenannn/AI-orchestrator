@@ -24,14 +24,41 @@ bin/orchestrator init --force /path/to/project
 
 ## Workflow
 
-1. Write the feature requirement in `.agent/REQUEST.md`.
-2. Ask Claude Code to create `.agent/PLAN.md` and populate `.agent/TASKS.json`.
-3. Set `phase=implementing` and the active `task_id` in `.agent/STATUS.md`.
-4. Ask Codex to implement only that task and run its validation commands.
-5. Codex sets `phase=reviewing`; Claude Code records its decision in
-   `.agent/REVIEW.md`.
-6. Claude Code sets `phase=fixing` for findings or `phase=approved` after an
-   approval. Codex handles fixes, then the cycle repeats.
+Start a feature and run its complete first task with one command:
+
+```sh
+bin/orchestrator start /path/to/project "Add tenant rate limiting"
+```
+
+`start` writes the objective to `.agent/REQUEST.md`, sets the workflow to
+`planning`, and then runs `cycle`. The runner dispatches Claude Code for
+planning and review, and Codex for implementation and fixes. It stops when the
+task is approved, an agent fails, the state is invalid, or the correction limit
+is reached.
+
+For a requirement already written in `.agent/REQUEST.md`, set its state to
+`planning` and run:
+
+```sh
+bin/orchestrator cycle /path/to/project
+```
+
+The default limits are two correction attempts and twelve agent dispatches.
+Change them when needed:
+
+```sh
+bin/orchestrator cycle --max-fixes 3 --max-steps 10 /path/to/project
+```
+
+Preview the next dispatch without changing files or invoking an agent:
+
+```sh
+bin/orchestrator cycle --dry-run /path/to/project
+```
+
+Each non-dry run saves combined agent output under `.agent/runs/`. The runner
+uses `claude --print` and `codex exec --sandbox workspace-write`; it never uses
+dangerous permission-bypass options.
 
 Check the current handoff at any time:
 

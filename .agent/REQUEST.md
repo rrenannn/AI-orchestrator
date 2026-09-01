@@ -12,6 +12,8 @@ revisão entre Claude Code e Codex em qualquer projeto.
 - Preservar arquivos de instrução existentes por padrão.
 - Informar a próxima ação a partir de um estado compartilhado.
 - Fornecer templates para requisito, plano, tarefas e revisão.
+- Executar os handoffs entre Claude Code e Codex por um comando único.
+- Limitar ciclos de correção e registrar a saída de cada agente.
 
 ## Definition of Done
 

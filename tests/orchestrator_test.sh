@@ -76,4 +76,116 @@ assert_contains "$status_output" 'Phase: implementing'
 assert_contains "$status_output" 'Task: task=002'
 assert_contains "$status_output" 'Next: Codex implements task task=002 and runs validation.'
 
+fake_claude="${test_root}/fake-claude"
+fake_codex="${test_root}/fake-codex"
+
+cat >"$fake_claude" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+prompt=""
+for argument in "$@"; do
+  prompt="$argument"
+done
+
+case "$prompt" in
+  *'Create .agent/PLAN.md'*)
+    printf 'phase=implementing\ntask_id=task-001\n' >.agent/STATUS.md
+    printf 'fake claude planning\n'
+    ;;
+  *'Review only task'*)
+    if [[ -f .agent/.reviewed-once ]]; then
+      printf 'phase=approved\ntask_id=task-001\n' >.agent/STATUS.md
+      printf 'fake claude approval\n'
+    else
+      touch .agent/.reviewed-once
+      printf 'phase=fixing\ntask_id=task-001\n' >.agent/STATUS.md
+      printf 'fake claude changes requested\n'
+    fi
+    ;;
+  *)
+    printf 'Unexpected Claude prompt: %s\n' "$prompt" >&2
+    exit 1
+    ;;
+esac
+EOF
+
+cat >"$fake_codex" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+prompt=""
+for argument in "$@"; do
+  prompt="$argument"
+done
+
+case "$prompt" in
+  *'Implement only the current task'*|*'Correct only the review findings'*)
+    printf 'phase=reviewing\ntask_id=task-001\n' >.agent/STATUS.md
+    printf 'fake codex implementation\n'
+    ;;
+  *)
+    printf 'Unexpected Codex prompt: %s\n' "$prompt" >&2
+    exit 1
+    ;;
+esac
+EOF
+
+chmod +x "$fake_claude" "$fake_codex"
+
+cycle_target="${test_root}/cycle-target"
+"$CLI" init "$cycle_target" >/dev/null
+cycle_output="$(ORCHESTRATOR_CLAUDE_CMD="$fake_claude" ORCHESTRATOR_CODEX_CMD="$fake_codex" "$CLI" cycle --max-fixes 1 "$cycle_target")"
+assert_contains "$cycle_output" 'Task task-001 is approved.'
+cycle_log="$(find "${cycle_target}/.agent/runs" -type f -name '*.log' -print -quit)"
+[[ -n "$cycle_log" ]]
+assert_contains "$(<"$cycle_log")" 'fake claude approval'
+
+start_target="${test_root}/start-target"
+"$CLI" init "$start_target" >/dev/null
+start_output="$(ORCHESTRATOR_CLAUDE_CMD="$fake_claude" ORCHESTRATOR_CODEX_CMD="$fake_codex" "$CLI" start "$start_target" 'Automate a sample feature')"
+assert_contains "$start_output" 'Task task-001 is approved.'
+assert_contains "$(<"${start_target}/.agent/REQUEST.md")" 'Automate a sample feature'
+
+dry_run_output="$("$CLI" cycle --dry-run "$start_target")"
+assert_contains "$dry_run_output" 'Task task-001 is approved.'
+
+printf 'phase=implementing\ntask_id=task-001\n' >"${start_target}/.agent/STATUS.md"
+dry_run_output="$("$CLI" cycle --dry-run "$start_target")"
+assert_contains "$dry_run_output" 'Would dispatch Codex for phase implementing.'
+
+printf 'phase=invalid\ntask_id=task-001\n' >"${start_target}/.agent/STATUS.md"
+assert_failure_contains 'Unsupported workflow phase: invalid' "$CLI" cycle "$start_target"
+
+printf 'phase=implementing\ntask_id=\n' >"${start_target}/.agent/STATUS.md"
+assert_failure_contains 'Workflow phase implementing requires task_id.' "$CLI" cycle "$start_target"
+
+printf 'phase=fixing\ntask_id=task-001\n' >"${start_target}/.agent/STATUS.md"
+assert_failure_contains 'Correction limit reached (0).' "$CLI" cycle --max-fixes 0 "$start_target"
+
+stuck_codex="${test_root}/stuck-codex"
+cat >"$stuck_codex" <<'EOF'
+#!/usr/bin/env bash
+printf 'fake codex made no state change\n'
+EOF
+chmod +x "$stuck_codex"
+
+printf 'phase=implementing\ntask_id=task-001\n' >"${start_target}/.agent/STATUS.md"
+assert_failure_contains 'Codex completed without changing the workflow phase.' env ORCHESTRATOR_CODEX_CMD="$stuck_codex" "$CLI" cycle "$start_target"
+
+invalid_transition_claude="${test_root}/invalid-transition-claude"
+cat >"$invalid_transition_claude" <<'EOF'
+#!/usr/bin/env bash
+printf 'phase=implementing\ntask_id=task-001\n' >.agent/STATUS.md
+printf 'fake claude invalid transition\n'
+EOF
+chmod +x "$invalid_transition_claude"
+
+printf 'phase=reviewing\ntask_id=task-001\n' >"${start_target}/.agent/STATUS.md"
+assert_failure_contains 'Invalid workflow transition: reviewing -> implementing.' env ORCHESTRATOR_CLAUDE_CMD="$invalid_transition_claude" "$CLI" cycle "$start_target"
+
+limit_target="${test_root}/limit-target"
+"$CLI" init "$limit_target" >/dev/null
+assert_failure_contains 'Iteration limit reached (2).' env ORCHESTRATOR_CLAUDE_CMD="$fake_claude" ORCHESTRATOR_CODEX_CMD="$fake_codex" "$CLI" cycle --max-fixes 5 --max-steps 2 "$limit_target"
+
 printf 'orchestrator tests passed\n'

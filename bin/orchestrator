@@ -10,6 +10,8 @@ usage() {
 Usage:
   orchestrator init [--force] <project-directory>
   orchestrator status [project-directory]
+  orchestrator start [--dry-run] <project-directory> <requirement>
+  orchestrator cycle [--dry-run] [--max-fixes <count>] [--max-steps <count>] <project-directory>
 EOF
 }
 
@@ -126,6 +128,247 @@ status() {
   esac
 }
 
+require_initialized_project() {
+  local project_dir="$1"
+
+  if [[ ! -f "${project_dir}/.agent/STATUS.md" ]]; then
+    printf 'No workflow state found. Run: orchestrator init %s\n' "$project_dir" >&2
+    return 1
+  fi
+}
+
+write_status() {
+  local project_dir="$1"
+  local phase="$2"
+  local task_id="$3"
+
+  cat >"${project_dir}/.agent/STATUS.md" <<EOF
+# Workflow State
+# Supported phases: planning, implementing, reviewing, fixing, approved
+phase=${phase}
+task_id=${task_id}
+EOF
+}
+
+run_agent() {
+  local agent_name="$1"
+  local project_dir="$2"
+  local log_file="$3"
+  local prompt="$4"
+  shift 4
+
+  printf 'Running %s...\n' "$agent_name"
+  (
+    cd "$project_dir"
+    "$@" "$prompt"
+  ) 2>&1 | tee -a "$log_file"
+}
+
+dispatch_claude() {
+  local project_dir="$1"
+  local log_file="$2"
+  local prompt="$3"
+  local claude_command="${ORCHESTRATOR_CLAUDE_CMD:-claude}"
+
+  if ! command -v "$claude_command" >/dev/null 2>&1; then
+    printf 'Claude Code executable not found: %s\n' "$claude_command" >&2
+    return 1
+  fi
+
+  run_agent "Claude Code" "$project_dir" "$log_file" "$prompt" \
+    "$claude_command" --permission-mode acceptEdits --print
+}
+
+dispatch_codex() {
+  local project_dir="$1"
+  local log_file="$2"
+  local prompt="$3"
+  local codex_command="${ORCHESTRATOR_CODEX_CMD:-codex}"
+
+  if ! command -v "$codex_command" >/dev/null 2>&1; then
+    printf 'Codex executable not found: %s\n' "$codex_command" >&2
+    return 1
+  fi
+
+  run_agent "Codex" "$project_dir" "$log_file" "$prompt" \
+    "$codex_command" exec --cd "$project_dir" --sandbox workspace-write
+}
+
+is_valid_transition() {
+  local phase="$1"
+  local next_phase="$2"
+
+  case "${phase}:${next_phase}" in
+    planning:implementing|implementing:reviewing|reviewing:fixing|reviewing:approved|fixing:reviewing) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+cycle() {
+  local dry_run="false"
+  local max_fixes="2"
+  local max_steps="12"
+  local project_arg=""
+  local argument
+
+  while [[ "$#" -gt 0 ]]; do
+    argument="$1"
+    shift
+    case "$argument" in
+      --dry-run) dry_run="true" ;;
+      --max-fixes)
+        if [[ "$#" -eq 0 ]]; then
+          usage >&2
+          return 1
+        fi
+        max_fixes="$1"
+        shift
+        ;;
+      --max-steps)
+        if [[ "$#" -eq 0 ]]; then
+          usage >&2
+          return 1
+        fi
+        max_steps="$1"
+        shift
+        ;;
+      -*) usage >&2; return 1 ;;
+      *)
+        if [[ -n "$project_arg" ]]; then
+          usage >&2
+          return 1
+        fi
+        project_arg="$argument"
+        ;;
+    esac
+  done
+
+  if [[ -z "$project_arg" || ! "$max_fixes" =~ ^[0-9]+$ || ! "$max_steps" =~ ^[1-9][0-9]*$ ]]; then
+    usage >&2
+    return 1
+  fi
+
+  local project_dir
+  project_dir="$(cd "$project_arg" 2>/dev/null && pwd)" || {
+    printf 'Project directory not found: %s\n' "$project_arg" >&2
+    return 1
+  }
+  require_initialized_project "$project_dir"
+
+  local fixes="0"
+  local steps="0"
+  local phase task_id next_phase log_file prompt
+  log_file="${project_dir}/.agent/runs/$(date +%Y%m%dT%H%M%S).log"
+
+  while true; do
+    phase="$(read_status_field "phase" "${project_dir}/.agent/STATUS.md")"
+    task_id="$(read_status_field "task_id" "${project_dir}/.agent/STATUS.md")"
+
+    if [[ "$phase" != "planning" && "$phase" != "approved" && -z "$task_id" ]]; then
+      printf 'Workflow phase %s requires task_id.\n' "$phase" >&2
+      return 1
+    fi
+
+    case "$phase" in
+      planning)
+        prompt='Read CLAUDE.md, .agent/REQUEST.md, and the project architecture. Do not implement code. Create .agent/PLAN.md and small ordered tasks in .agent/TASKS.json, select the first task, then set .agent/STATUS.md to phase=implementing with its task_id.'
+        ;;
+      implementing)
+        prompt="Read AGENTS.md, .agent/PLAN.md, .agent/TASKS.json, and .agent/REVIEW.md. Implement only the current task (${task_id:-unset}). Run its validation commands, inspect the diff, and set .agent/STATUS.md to phase=reviewing with the same task_id."
+        ;;
+      reviewing)
+        prompt="Read CLAUDE.md, .agent/PLAN.md, .agent/TASKS.json, .agent/REVIEW.md, the current diff, and validation results. Review only task ${task_id:-unset}. Record either APROVADO or MUDANÇAS SOLICITADAS in .agent/REVIEW.md. Set .agent/STATUS.md to phase=approved or phase=fixing with the same task_id."
+        ;;
+      fixing)
+        if [[ "$fixes" -ge "$max_fixes" ]]; then
+          printf 'Correction limit reached (%s). Review .agent/REVIEW.md.\n' "$max_fixes" >&2
+          return 1
+        fi
+        fixes=$((fixes + 1))
+        prompt="Read AGENTS.md and .agent/REVIEW.md. Correct only the review findings for task ${task_id:-unset}. Rerun its validation commands and set .agent/STATUS.md to phase=reviewing with the same task_id."
+        ;;
+      approved)
+        printf 'Task %s is approved. Log: %s\n' "${task_id:-unset}" "$log_file"
+        return 0
+        ;;
+      *)
+        printf 'Unsupported workflow phase: %s\n' "${phase:-unset}" >&2
+        return 1
+        ;;
+    esac
+
+    if [[ "$dry_run" == "true" ]]; then
+      printf 'Would dispatch %s for phase %s.\n' "$([[ "$phase" == "implementing" || "$phase" == "fixing" ]] && printf 'Codex' || printf 'Claude Code')" "$phase"
+      return 0
+    fi
+
+    if [[ "$steps" -ge "$max_steps" ]]; then
+      printf 'Iteration limit reached (%s). Review the workflow state.\n' "$max_steps" >&2
+      return 1
+    fi
+    steps=$((steps + 1))
+    mkdir -p "$(dirname "$log_file")"
+
+    if [[ "$phase" == "implementing" || "$phase" == "fixing" ]]; then
+      dispatch_codex "$project_dir" "$log_file" "$prompt"
+    else
+      dispatch_claude "$project_dir" "$log_file" "$prompt"
+    fi
+
+    next_phase="$(read_status_field "phase" "${project_dir}/.agent/STATUS.md")"
+    if [[ "$next_phase" == "$phase" ]]; then
+      printf '%s completed without changing the workflow phase.\n' "$([[ "$phase" == "implementing" || "$phase" == "fixing" ]] && printf 'Codex' || printf 'Claude Code')" >&2
+      return 1
+    fi
+    if ! is_valid_transition "$phase" "$next_phase"; then
+      printf 'Invalid workflow transition: %s -> %s.\n' "$phase" "${next_phase:-unset}" >&2
+      return 1
+    fi
+  done
+}
+
+start() {
+  local dry_run="false"
+
+  if [[ "${1:-}" == "--dry-run" ]]; then
+    dry_run="true"
+    shift
+  fi
+
+  if [[ "$#" -ne 2 || ! -d "$1" ]]; then
+    usage >&2
+    return 1
+  fi
+
+  local project_dir
+  project_dir="$(cd "$1" && pwd)"
+  local requirement="$2"
+  require_initialized_project "$project_dir"
+
+  if [[ "$dry_run" == "true" ]]; then
+    printf 'Would write the requirement and dispatch Claude Code for planning.\n'
+    return 0
+  fi
+
+  cat >"${project_dir}/.agent/REQUEST.md" <<EOF
+# Feature Request
+
+## Objective
+
+${requirement}
+
+## Requirements
+
+- Define observable behaviors and constraints.
+
+## Definition of Done
+
+- Define the conditions required for acceptance.
+EOF
+  write_status "$project_dir" "planning" ""
+  cycle "$project_dir"
+}
+
 main() {
   local command="${1:-}"
   shift || true
@@ -133,6 +376,8 @@ main() {
   case "$command" in
     init) initialize "$@" ;;
     status) status "$@" ;;
+    start) start "$@" ;;
+    cycle) cycle "$@" ;;
     *) usage >&2; return 1 ;;
   esac
 }

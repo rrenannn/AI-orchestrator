@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "currentTaskId": "bootstrap-orchestrator",
+  "currentTaskId": "automate-workflow-cycle",
   "tasks": [
     {
       "id": "bootstrap-orchestrator",
@@ -19,6 +19,31 @@
         "The CLI initializes templates in a target directory.",
         "The CLI reports the next workflow owner from STATUS.md.",
         "Automated tests cover initialization and status behavior."
+      ],
+      "validation": [
+        "bash -n bin/orchestrator tests/orchestrator_test.sh",
+        "bash tests/orchestrator_test.sh"
+      ]
+    },
+    {
+      "id": "automate-workflow-cycle",
+      "status": "approved",
+      "objective": "Run bounded Claude Code and Codex handoffs from workflow state.",
+      "affectedFiles": [
+        "bin/orchestrator",
+        "README.md",
+        "tests/orchestrator_test.sh"
+      ],
+      "implementationNotes": [
+        "Use installed CLI executables in non-interactive mode.",
+        "Keep a correction limit and preserve logs under .agent/runs/.",
+        "Do not use dangerous permission bypass options."
+      ],
+      "acceptanceCriteria": [
+        "A start command records a requirement and begins the planning phase.",
+        "A cycle command dispatches the responsible CLI from STATUS.md.",
+        "The cycle stops on approval, failure, an invalid state, or its correction limit.",
+        "Tests use fake executables and do not invoke real AI agents."
       ],
       "validation": [
         "bash -n bin/orchestrator tests/orchestrator_test.sh",
