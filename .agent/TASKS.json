@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "currentTaskId": "bootstrap-orchestrator",
+  "tasks": [
+    {
+      "id": "bootstrap-orchestrator",
+      "status": "approved",
+      "objective": "Provide a generic, safe orchestration bootstrap CLI.",
+      "affectedFiles": [
+        "bin/orchestrator",
+        "templates/",
+        "tests/orchestrator_test.sh"
+      ],
+      "implementationNotes": [
+        "Use Bash and standard utilities only.",
+        "Preserve existing target files unless --force is supplied."
+      ],
+      "acceptanceCriteria": [
+        "The CLI initializes templates in a target directory.",
+        "The CLI reports the next workflow owner from STATUS.md.",
+        "Automated tests cover initialization and status behavior."
+      ],
+      "validation": [
+        "bash -n bin/orchestrator tests/orchestrator_test.sh",
+        "bash tests/orchestrator_test.sh"
+      ]
+    }
+  ]
+}

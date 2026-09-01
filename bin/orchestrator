@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly TEMPLATE_DIR="${SCRIPT_DIR}/../templates"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  orchestrator init [--force] <project-directory>
+  orchestrator status [project-directory]
+EOF
+}
+
+copy_template() {
+  local relative_path="$1"
+  local target_dir="$2"
+  local force="$3"
+  local source_path="${TEMPLATE_DIR}/${relative_path}"
+  local destination_path="${target_dir}/${relative_path}"
+
+  if [[ -e "$destination_path" && "$force" != "true" ]]; then
+    printf 'Preserved existing %s\n' "$relative_path"
+    return
+  fi
+
+  mkdir -p "$(dirname "$destination_path")"
+  cp "$source_path" "$destination_path"
+  printf 'Installed %s\n' "$relative_path"
+}
+
+initialize() {
+  local force="false"
+  local target_arg=""
+  local argument
+
+  for argument in "$@"; do
+    case "$argument" in
+      --force) force="true" ;;
+      -*) usage >&2; return 1 ;;
+      *)
+        if [[ -n "$target_arg" ]]; then
+          usage >&2
+          return 1
+        fi
+        target_arg="$argument"
+        ;;
+    esac
+  done
+
+  if [[ -z "$target_arg" ]]; then
+    usage >&2
+    return 1
+  fi
+
+  mkdir -p "$target_arg"
+
+  local target_dir
+  target_dir="$(cd "$target_arg" && pwd)"
+  local template_files=(
+    "AGENTS.md"
+    "CLAUDE.md"
+    ".agent/REQUEST.md"
+    ".agent/PLAN.md"
+    ".agent/TASKS.json"
+    ".agent/REVIEW.md"
+    ".agent/STATUS.md"
+  )
+  local relative_path
+
+  for relative_path in "${template_files[@]}"; do
+    copy_template "$relative_path" "$target_dir" "$force"
+  done
+}
+
+read_status_field() {
+  local field_name="$1"
+  local status_file="$2"
+
+  awk -v field_name="$field_name" '
+    index($0, "=") {
+      key = $0
+      sub(/=.*/, "", key)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+      if (key == field_name) {
+        value = $0
+        sub(/^[^=]*=/, "", value)
+        gsub(/\r/, "", value)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+        print value
+        exit
+      }
+    }
+  ' "$status_file"
+}
+
+status() {
+  if [[ "$#" -gt 1 ]]; then
+    usage >&2
+    return 1
+  fi
+
+  local target_dir="${1:-.}"
+  local status_file="${target_dir}/.agent/STATUS.md"
+
+  if [[ ! -f "$status_file" ]]; then
+    printf 'No workflow state found. Run: orchestrator init %s\n' "$target_dir" >&2
+    return 1
+  fi
+
+  local phase task_id
+  phase="$(read_status_field "phase" "$status_file")"
+  task_id="$(read_status_field "task_id" "$status_file")"
+
+  printf 'Phase: %s\n' "${phase:-unknown}"
+  printf 'Task: %s\n' "${task_id:-none}"
+
+  case "$phase" in
+    planning) printf 'Next: Claude Code creates PLAN.md and TASKS.json.\n' ;;
+    implementing) printf 'Next: Codex implements task %s and runs validation.\n' "${task_id:-<unset>}" ;;
+    reviewing) printf 'Next: Claude Code reviews the implementation in REVIEW.md.\n' ;;
+    fixing) printf 'Next: Codex applies review findings and reruns validation.\n' ;;
+    approved) printf 'Next: Claude Code selects the next pending task or completes the request.\n' ;;
+    *) printf 'Next: Set a supported phase in .agent/STATUS.md.\n' ;;
+  esac
+}
+
+main() {
+  local command="${1:-}"
+  shift || true
+
+  case "$command" in
+    init) initialize "$@" ;;
+    status) status "$@" ;;
+    *) usage >&2; return 1 ;;
+  esac
+}
+
+main "$@"
